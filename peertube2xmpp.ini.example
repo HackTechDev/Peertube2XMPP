@@ -1,0 +1,20 @@
+# Copier vers ~/.config/peertube2xmpp.ini puis : chmod 600 ~/.config/peertube2xmpp.ini
+# Chaque valeur peut aussi être fournie par variable d'environnement
+# (PEERTUBE2XMPP_JID, PEERTUBE2XMPP_PASSWORD, PEERTUBE2XMPP_ROOM, PEERTUBE2XMPP_NICK,
+#  PEERTUBE2XMPP_URL, PEERTUBE2XMPP_ACCOUNT, PEERTUBE2XMPP_STATE_FILE, PEERTUBE2XMPP_MESSAGE)
+
+[xmpp]
+# Compte XMPP utilisé par le bot (idéalement un compte dédié)
+jid = peertubebot@tarentule.us
+password = changeme
+room = hacktechdev@conference.tarentule.us
+nick = PeerTube
+
+[peertube]
+# Instance PeerTube et compte dont les vidéos sont annoncées
+url = https://peertube.hacktech.dev
+account = administrateur
+# Optionnel : fichier mémorisant les vidéos déjà annoncées (défaut : seen.json à côté du script)
+# state_file = ~/.local/share/peertube2xmpp/seen.json
+# Variables disponibles : {title} {url} {channel} {duration}
+message = 📺 Nouvelle vidéo : {title}\n{url}

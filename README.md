@@ -44,35 +44,59 @@ python3 -m venv .venv
 
 ## Configuration
 
-Toute la configuration passe par des variables d'environnement :
-
-| Variable           | Obligatoire | Valeur par défaut                      |
-|--------------------|-------------|----------------------------------------|
-| `XMPP_JID`         | oui         |                                        |
-| `XMPP_PASSWORD`    | oui         |                                        |
-| `XMPP_ROOM`        | non         | `hacktechdev@conference.tarentule.us`  |
-| `XMPP_NICK`        | non         | `PeerTube`                             |
-| `PEERTUBE_URL`     | non         | `https://peertube.hacktech.dev`        |
-| `PEERTUBE_ACCOUNT` | non         | `administrateur`                       |
-| `STATE_FILE`       | non         | `seen.json` à côté du script           |
-
-Pour ne pas écrire le mot de passe dans la crontab, placez les variables dans un
-fichier `.env` lisible par vous seul (il est ignoré par git) :
+La configuration se fait dans un fichier INI. Partez de l'exemple fourni :
 
 ```bash
-cat > .env <<'EOF'
-export XMPP_JID=peertube-bot@tarentule.us
-export XMPP_PASSWORD=motdepasse
-EOF
-chmod 600 .env
+cp peertube2xmpp.ini.example ~/.config/peertube2xmpp.ini
+chmod 600 ~/.config/peertube2xmpp.ini   # il contient le mot de passe XMPP
 ```
+
+```ini
+[xmpp]
+jid = peertubebot@tarentule.us
+password = changeme
+room = hacktechdev@conference.tarentule.us
+nick = PeerTube
+
+[peertube]
+url = https://peertube.hacktech.dev
+account = administrateur
+# state_file = ~/.local/share/peertube2xmpp/seen.json
+message = 📺 Nouvelle vidéo : {title}\n{url}
+```
+
+Le fichier est cherché, dans cet ordre :
+
+1. le chemin passé avec `-c` / `--config` (seul ce fichier est alors lu) ;
+2. le chemin indiqué par la variable `PEERTUBE2XMPP_CONFIG` ;
+3. `~/.config/peertube2xmpp.ini` ;
+4. `peertube2xmpp.ini` à côté du script (ignoré par git).
+
+| Clé          | Section      | Obligatoire | Valeur par défaut                      |
+|--------------|--------------|-------------|----------------------------------------|
+| `jid`        | `[xmpp]`     | oui         |                                        |
+| `password`   | `[xmpp]`     | oui         |                                        |
+| `room`       | `[xmpp]`     | non         | `hacktechdev@conference.tarentule.us`  |
+| `nick`       | `[xmpp]`     | non         | `PeerTube`                             |
+| `url`        | `[peertube]` | non         | `https://peertube.hacktech.dev`        |
+| `account`    | `[peertube]` | non         | `administrateur`                       |
+| `state_file` | `[peertube]` | non         | `seen.json` à côté du script           |
+| `message`    | `[peertube]` | non         | `📺 Nouvelle vidéo : {title}\n{url}`   |
+
+Le salon peut aussi s'écrire sous forme d'URI (`xmpp:salon@serveur?join`).
+Dans `message`, `\n` produit un saut de ligne, et les variables disponibles sont
+`{title}`, `{url}`, `{channel}` (nom de la chaîne) et `{duration}` (ex. `1:30`).
+
+Chaque clé peut aussi être fournie par une variable d'environnement
+`PEERTUBE2XMPP_<CLÉ>` (ex. `PEERTUBE2XMPP_PASSWORD`), qui l'emporte toujours sur
+le fichier.
 
 ## Utilisation
 
 Premier lancement (initialisation, rien n'est posté) :
 
 ```bash
-. ./.env && .venv/bin/python peertube2xmpp.py
+.venv/bin/python peertube2xmpp.py
 ```
 
 Afficher les messages qui seraient envoyés, sans se connecter à XMPP :
@@ -81,10 +105,16 @@ Afficher les messages qui seraient envoyés, sans se connecter à XMPP :
 .venv/bin/python peertube2xmpp.py --dry-run
 ```
 
+Utiliser un autre fichier de configuration :
+
+```bash
+.venv/bin/python peertube2xmpp.py -c /chemin/vers/config.ini
+```
+
 Lancement automatique toutes les 10 minutes avec cron (`crontab -e`) :
 
 ```
-*/10 * * * * cd /chemin/vers/peertube2xmpp && . ./.env && .venv/bin/python peertube2xmpp.py >> log.txt 2>&1
+*/10 * * * * /chemin/vers/peertube2xmpp/.venv/bin/python /chemin/vers/peertube2xmpp/peertube2xmpp.py >> /chemin/vers/peertube2xmpp/peertube2xmpp.log 2>&1
 ```
 
 Le script doit tourner sur une machine allumée en permanence, idéalement le

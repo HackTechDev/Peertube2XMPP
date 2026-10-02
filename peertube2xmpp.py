@@ -3,77 +3,171 @@
 
 À lancer périodiquement (cron, timer systemd). Au premier lancement, les vidéos
 existantes sont mémorisées sans être annoncées.
+
+Exemples :
+    peertube2xmpp.py                  # annonce les nouvelles vidéos
+    peertube2xmpp.py -c config.ini    # utilise un fichier de configuration précis
+    peertube2xmpp.py --dry-run        # affiche les messages sans les envoyer
 """
+
+from __future__ import annotations
+
+import argparse
+import configparser
 import json
 import os
 import sys
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 
-import slixmpp
+SCRIPT_DIR = Path(__file__).resolve().parent
 
-PEERTUBE_URL = os.environ.get("PEERTUBE_URL", "https://peertube.hacktech.dev")
-PEERTUBE_ACCOUNT = os.environ.get("PEERTUBE_ACCOUNT", "administrateur")
-XMPP_ROOM = os.environ.get("XMPP_ROOM", "hacktechdev@conference.tarentule.us")
-XMPP_NICK = os.environ.get("XMPP_NICK", "PeerTube")
-STATE_FILE = Path(os.environ.get("STATE_FILE", Path(__file__).with_name("seen.json")))
+# Emplacements où chercher le fichier de configuration, par ordre de priorité.
+# Les chemins inexistants sont simplement ignorés par ConfigParser.read().
+DEFAULT_CONFIG_PATHS = [
+    os.environ.get("PEERTUBE2XMPP_CONFIG", ""),
+    os.path.expanduser("~/.config/peertube2xmpp.ini"),
+    str(SCRIPT_DIR / "peertube2xmpp.ini"),
+]
 
 
-def fetch_videos():
+@dataclass
+class Config:
+    """Paramètres du script, lus depuis le fichier INI et l'environnement."""
+
+    # Compte XMPP du bot (obligatoires, sauf en --dry-run)
+    jid: str
+    password: str
+    room: str = "hacktechdev@conference.tarentule.us"
+    nick: str = "PeerTube"
+    # Instance et compte PeerTube surveillés
+    url: str = "https://peertube.hacktech.dev"
+    account: str = "administrateur"
+    # Fichier mémorisant les vidéos déjà annoncées
+    state_file: str = str(SCRIPT_DIR / "seen.json")
+    # Modèle du message ; variables : {title} {url} {channel} {duration}
+    message: str = "📺 Nouvelle vidéo : {title}\n{url}"
+
+    @classmethod
+    def load(cls, path: str | None) -> "Config":
+        """Construit la configuration.
+
+        Si `path` est fourni, seul ce fichier est lu ; sinon on essaie
+        DEFAULT_CONFIG_PATHS. Une variable d'environnement PEERTUBE2XMPP_*
+        l'emporte toujours sur la valeur du fichier.
+        """
+        # interpolation=None : un « % » dans le mot de passe ne doit pas être
+        # interprété comme une référence à une autre clé.
+        parser = configparser.ConfigParser(interpolation=None)
+        paths = [path] if path else [p for p in DEFAULT_CONFIG_PATHS if p]
+        if not parser.read(paths, encoding="utf-8") and path:
+            sys.exit(f"Fichier de configuration introuvable : {path}")
+        xmpp = parser["xmpp"] if parser.has_section("xmpp") else {}
+        peertube = parser["peertube"] if parser.has_section("peertube") else {}
+
+        def get(section, key, default=""):
+            """Valeur de `key` : variable d'environnement, puis fichier, puis défaut."""
+            return os.environ.get(f"PEERTUBE2XMPP_{key.upper()}") or section.get(key, default)
+
+        # Accepte aussi la forme URI « xmpp:salon@serveur?join ».
+        room = get(xmpp, "room", cls.room).removeprefix("xmpp:").split("?")[0]
+        return cls(
+            jid=get(xmpp, "jid"),
+            password=get(xmpp, "password"),
+            room=room,
+            nick=get(xmpp, "nick", cls.nick),
+            # Le « / » final est retiré pour éviter un « // » dans les URL.
+            url=get(peertube, "url", cls.url).rstrip("/"),
+            account=get(peertube, "account", cls.account),
+            state_file=os.path.expanduser(get(peertube, "state_file", cls.state_file)),
+            # Dans un fichier INI, le saut de ligne s'écrit littéralement « \n ».
+            message=get(peertube, "message", cls.message).replace("\\n", "\n"),
+        )
+
+
+def fetch_videos(cfg: Config):
     """Dernières vidéos publiques du compte, de la plus ancienne à la plus récente."""
-    url = f"{PEERTUBE_URL}/api/v1/accounts/{PEERTUBE_ACCOUNT}/videos?sort=-publishedAt&count=20"
+    url = f"{cfg.url}/api/v1/accounts/{cfg.account}/videos?sort=-publishedAt&count=20"
     with urllib.request.urlopen(url, timeout=30) as resp:
         return list(reversed(json.load(resp)["data"]))
 
 
-def format_message(video):
-    return f"📺 Nouvelle vidéo : {video['name']}\n{video['url']}"
+def format_message(cfg: Config, video) -> str:
+    minutes, seconds = divmod(video["duration"], 60)
+    return cfg.message.format(
+        title=video["name"],
+        url=video["url"],
+        channel=video["channel"]["displayName"],
+        duration=f"{minutes}:{seconds:02d}",
+    )
 
 
-class Notifier(slixmpp.ClientXMPP):
-    def __init__(self, jid, password, messages):
-        super().__init__(jid, password)
-        self.messages = messages
-        self.sent = False
-        self.register_plugin("xep_0045")
-        self.add_event_handler("session_start", self.start)
-        self.add_event_handler("failed_auth", lambda _: self.disconnect())
+def send_to_muc(cfg: Config, messages: list[str]) -> bool:
+    """Rejoint le salon, envoie `messages` puis se déconnecte. Renvoie True si envoyé."""
+    import slixmpp
 
-    async def start(self, _):
-        await self.plugin["xep_0045"].join_muc_wait(XMPP_ROOM, XMPP_NICK, maxstanzas=0)
-        for body in self.messages:
-            self.send_message(mto=XMPP_ROOM, mbody=body, mtype="groupchat")
-        self.sent = True
-        self.disconnect()
+    class Notifier(slixmpp.ClientXMPP):
+        def __init__(self):
+            super().__init__(cfg.jid, cfg.password)
+            self.sent = False
+            self.register_plugin("xep_0045")
+            self.add_event_handler("session_start", self.start)
+            self.add_event_handler("failed_auth", lambda _: self.disconnect())
 
+        async def start(self, _):
+            await self.plugin["xep_0045"].join_muc_wait(cfg.room, cfg.nick, maxstanzas=0)
+            for body in messages:
+                self.send_message(mto=cfg.room, mbody=body, mtype="groupchat")
+            self.sent = True
+            self.disconnect()
 
-def main():
-    dry_run = "--dry-run" in sys.argv
-    videos = fetch_videos()
-
-    if not STATE_FILE.exists():
-        STATE_FILE.write_text(json.dumps([v["uuid"] for v in videos]))
-        print(f"Initialisation : {len(videos)} vidéos existantes mémorisées, rien annoncé.")
-        return
-
-    seen = set(json.loads(STATE_FILE.read_text()))
-    new = [v for v in videos if v["uuid"] not in seen]
-    if not new:
-        return
-
-    messages = [format_message(v) for v in new]
-    if dry_run:
-        print("\n\n".join(messages))
-        return
-
-    xmpp = Notifier(os.environ["XMPP_JID"], os.environ["XMPP_PASSWORD"], messages)
+    xmpp = Notifier()
     xmpp.connect()
     xmpp.loop.run_until_complete(xmpp.disconnected)
-    if not xmpp.sent:
-        sys.exit("Échec de l'envoi XMPP, vidéos non marquées comme annoncées.")
+    return xmpp.sent
 
-    STATE_FILE.write_text(json.dumps(sorted(seen | {v["uuid"] for v in new})))
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("-c", "--config", help="fichier de configuration INI")
+    ap.add_argument("-n", "--dry-run", action="store_true",
+                    help="affiche les messages sans les envoyer")
+    args = ap.parse_args()
+
+    cfg = Config.load(args.config)
+    state_file = Path(cfg.state_file)
+    videos = fetch_videos(cfg)
+
+    if not state_file.exists():
+        state_file.parent.mkdir(parents=True, exist_ok=True)
+        state_file.write_text(json.dumps([v["uuid"] for v in videos]))
+        print(f"Initialisation : {len(videos)} vidéos existantes mémorisées, rien annoncé.")
+        return 0
+
+    seen = set(json.loads(state_file.read_text()))
+    new = [v for v in videos if v["uuid"] not in seen]
+    if not new:
+        return 0
+
+    messages = [format_message(cfg, v) for v in new]
+    if args.dry_run:
+        print("\n\n".join(messages))
+        return 0
+
+    # Les identifiants ne sont vérifiés qu'ici : --dry-run n'en a pas besoin.
+    if not cfg.jid or not cfg.password:
+        print("JID/mot de passe XMPP manquants (voir peertube2xmpp.ini.example).",
+              file=sys.stderr)
+        return 1
+    if not send_to_muc(cfg, messages):
+        print("Échec de l'envoi XMPP, vidéos non marquées comme annoncées.",
+              file=sys.stderr)
+        return 1
+
+    state_file.write_text(json.dumps(sorted(seen | {v["uuid"] for v in new})))
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
