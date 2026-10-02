@@ -14,6 +14,7 @@ Exemples :
 from __future__ import annotations
 
 import argparse
+import asyncio
 import configparser
 import json
 import os
@@ -50,6 +51,8 @@ class Config:
     # Salon cible et pseudo utilisé pour le rejoindre
     room: str = "hacktechdev@conference.tarentule.us"
     nick: str = "PeerTube"
+    # Durée maximale (secondes) de la connexion et de l'envoi XMPP
+    timeout: float = 30
     # Instance et compte PeerTube surveillés
     url: str = "https://peertube.hacktech.dev"
     account: str = "administrateur"
@@ -92,6 +95,7 @@ class Config:
             password=get(xmpp, "password"),
             room=room,
             nick=get(xmpp, "nick", cls.nick),
+            timeout=float(get(xmpp, "timeout", cls.timeout)),
             # Le « / » final est retiré pour éviter un « // » dans les URL.
             url=get(peertube, "url", cls.url).rstrip("/"),
             account=get(peertube, "account", cls.account),
@@ -143,6 +147,18 @@ def fetch_video(cfg: Config, video_id: str):
         return json.load(resp)
 
 
+def peertube_error(cfg: Config, exc: Exception) -> int:
+    """Journalise une erreur d'accès à PeerTube et renvoie le code de sortie 1.
+
+    OSError couvre l'instance injoignable (DNS, connexion refusée, délai
+    dépassé…) et ValueError une réponse qui n'est pas du JSON valide.
+    """
+    # URLError range la cause réelle dans .reason
+    reason = getattr(exc, "reason", None) or exc or type(exc).__name__
+    log(f"PeerTube injoignable ({cfg.url}) : {reason}", file=sys.stderr)
+    return 1
+
+
 def format_message(cfg: Config, video) -> str:
     """Texte à poster dans le salon pour `video`, d'après le modèle `message`."""
     # Durée affichée en « minutes:secondes », ex. 90 s → « 1:30 »
@@ -159,8 +175,12 @@ def format_message(cfg: Config, video) -> str:
 # --------------------------------------------------------------------------- #
 # XMPP
 # --------------------------------------------------------------------------- #
-def send_to_muc(cfg: Config, messages: list[str]) -> bool:
-    """Rejoint le salon, envoie `messages` puis se déconnecte. Renvoie True si envoyé."""
+def send_to_muc(cfg: Config, messages: list[str]) -> None:
+    """Rejoint le salon, envoie `messages` puis se déconnecte.
+
+    Lève une exception en cas d'échec (authentification, salon, réseau) ou si
+    l'ensemble dépasse cfg.timeout secondes.
+    """
     # Import tardif : --dry-run fonctionne même sans slixmpp installé.
     import slixmpp
 
@@ -169,30 +189,79 @@ def send_to_muc(cfg: Config, messages: list[str]) -> bool:
 
         def __init__(self):
             super().__init__(cfg.jid, cfg.password)
-            # Passe à True une fois les messages envoyés : c'est ce que
-            # renvoie send_to_muc().
-            self.sent = False
+            # Future résolue quand l'envoi est terminé (ou a échoué) : c'est
+            # elle qu'attend send_to_muc(). Chaque gestionnaire vérifie done()
+            # car une future ne peut être résolue qu'une seule fois.
+            self.done = self.loop.create_future()
+            # Dernière erreur de connexion : slixmpp réessaie de se connecter
+            # en boucle, on ne la signale donc qu'en cas de délai dépassé.
+            self.last_error = None
             self.register_plugin("xep_0045")  # MUC (salons de discussion)
             self.add_event_handler("session_start", self.start)
-            # Mauvais JID ou mot de passe : on se déconnecte, sent reste False.
-            self.add_event_handler("failed_auth", lambda _: self.disconnect())
+            self.add_event_handler("failed_auth", self.on_failed_auth)
+            self.add_event_handler("connection_failed", self.on_connection_failed)
+            # Connexion établie : une erreur d'une tentative précédente
+            # (ex. IPv6 avant IPv4) n'est plus pertinente.
+            self.add_event_handler("connected", lambda _: setattr(self, "last_error", None))
+            self.add_event_handler("disconnected", self.on_disconnected)
+
+        def fail(self, exc: Exception) -> None:
+            """Marque l'envoi comme échoué (sans effet s'il est déjà terminé)."""
+            if not self.done.done():
+                self.done.set_exception(exc)
 
         async def start(self, _):
             """Session ouverte : rejoint le salon et envoie les messages."""
-            # Attend la confirmation du salon ; maxstanzas=0 évite de
-            # recevoir l'historique des messages déjà postés.
-            await self.plugin["xep_0045"].join_muc_wait(cfg.room, cfg.nick, maxstanzas=0)
-            for body in messages:
-                # « groupchat » : message adressé à tout le salon
-                self.send_message(mto=cfg.room, mbody=body, mtype="groupchat")
-            self.sent = True
-            self.disconnect()
+            try:
+                # Attend la confirmation du salon ; maxstanzas=0 évite de
+                # recevoir l'historique des messages déjà postés. Lève une
+                # exception si le salon refuse l'entrée.
+                await self.plugin["xep_0045"].join_muc_wait(
+                    cfg.room, cfg.nick, maxstanzas=0, timeout=cfg.timeout
+                )
+                for body in messages:
+                    # « groupchat » : message adressé à tout le salon
+                    self.send_message(mto=cfg.room, mbody=body, mtype="groupchat")
+                if not self.done.done():
+                    self.done.set_result(None)
+            except Exception as exc:
+                self.fail(RuntimeError(f"impossible de rejoindre {cfg.room} : "
+                                       f"{exc or type(exc).__name__}"))
+
+        def on_failed_auth(self, _):
+            """Le serveur a refusé le JID ou le mot de passe."""
+            self.fail(RuntimeError("authentification XMPP refusée"))
+
+        def on_connection_failed(self, error):
+            """Échec d'une tentative de connexion (DNS, port fermé…)."""
+            self.last_error = error
+
+        def on_disconnected(self, _):
+            """Déconnexion avant la fin de l'envoi : considérée comme un échec.
+
+            Après un envoi réussi, `done` est déjà résolue et rien ne change.
+            """
+            self.fail(RuntimeError("déconnecté du serveur XMPP"))
 
     xmpp = Notifier()
     xmpp.connect()
-    # Bloque jusqu'à la déconnexion, qu'elle suive l'envoi ou un échec.
-    xmpp.loop.run_until_complete(xmpp.disconnected)
-    return xmpp.sent
+    try:
+        # Le délai global couvre la connexion, l'authentification et l'envoi.
+        xmpp.loop.run_until_complete(asyncio.wait_for(xmpp.done, cfg.timeout))
+    except asyncio.TimeoutError:
+        detail = f", dernière erreur : {xmpp.last_error}" if xmpp.last_error else ""
+        raise RuntimeError(f"délai de {cfg.timeout:g} s dépassé{detail}") from None
+    finally:
+        # Dans tous les cas : arrête les tentatives de reconnexion, puis ferme
+        # la connexion après l'envoi des messages en attente (2 s au plus).
+        xmpp.cancel_connection_attempt()
+        xmpp.loop.run_until_complete(xmpp.disconnect())
+        # Annule les tâches internes de slixmpp encore actives, pour éviter
+        # l'avertissement « Task was destroyed but it is pending » en sortie.
+        pending = asyncio.all_tasks(xmpp.loop)
+        for task in pending:
+            task.cancel()
+        xmpp.loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
 
 
 # --------------------------------------------------------------------------- #
@@ -223,9 +292,18 @@ def main() -> int:
             log(f"Vidéo {args.video} introuvable sur {cfg.url} (HTTP {exc.code}).",
                 file=sys.stderr)
             return 1
+        except (OSError, ValueError) as exc:
+            return peertube_error(cfg, exc)
         seen = set(json.loads(state_file.read_text())) if state_file.exists() else set()
     else:
-        videos = fetch_videos(cfg)
+        try:
+            videos = fetch_videos(cfg)
+        except urllib.error.HTTPError as exc:
+            log(f"Compte {cfg.account} introuvable sur {cfg.url} (HTTP {exc.code}).",
+                file=sys.stderr)
+            return 1
+        except (OSError, ValueError) as exc:
+            return peertube_error(cfg, exc)
         # Premier lancement : on mémorise l'existant sans rien annoncer, pour
         # ne pas inonder le salon avec des vidéos anciennes.
         if not state_file.exists():
@@ -256,11 +334,13 @@ def main() -> int:
         log("JID/mot de passe XMPP manquants (voir peertube2xmpp.ini.example).",
             file=sys.stderr)
         return 1
-    if not send_to_muc(cfg, messages):
+    try:
+        send_to_muc(cfg, messages)
+    except Exception as exc:
         # Le fichier d'état n'est pas mis à jour : ces vidéos seront de
         # nouveau proposées au prochain lancement.
-        log("Échec de l'envoi XMPP, vidéos non marquées comme annoncées.",
-            file=sys.stderr)
+        log(f"Échec de l'envoi XMPP : {exc or type(exc).__name__}. "
+            "Vidéos non marquées comme annoncées.", file=sys.stderr)
         return 1
 
     # --- Mise à jour du fichier d'état

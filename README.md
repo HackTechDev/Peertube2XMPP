@@ -24,7 +24,9 @@ script est donc conçu pour être lancé périodiquement (cron, timer systemd) :
    message par vidéo puis se déconnecte.
 
 Une vidéo n'est marquée comme annoncée qu'une fois le message envoyé : en cas
-d'échec, elle sera reproposée au lancement suivant.
+d'échec, elle sera reproposée au lancement suivant. L'envoi est limité à 30 s
+(clé `timeout`) : un serveur XMPP injoignable ne bloque donc jamais la tâche
+cron, et l'erreur est écrite dans le log.
 
 Au **premier lancement**, les vidéos déjà en ligne sont simplement mémorisées,
 sans être annoncées, pour ne pas inonder le salon.
@@ -78,6 +80,7 @@ Le fichier est cherché, dans cet ordre :
 | `password`   | `[xmpp]`     | oui         |                                        |
 | `room`       | `[xmpp]`     | non         | `hacktechdev@conference.tarentule.us`  |
 | `nick`       | `[xmpp]`     | non         | `PeerTube`                             |
+| `timeout`    | `[xmpp]`     | non         | `30` (secondes)                        |
 | `url`        | `[peertube]` | non         | `https://peertube.hacktech.dev`        |
 | `account`    | `[peertube]` | non         | `administrateur`                       |
 | `state_file` | `[peertube]` | non         | `seen.json` à côté du script           |
