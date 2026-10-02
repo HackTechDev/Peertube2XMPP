@@ -19,6 +19,7 @@ import os
 import sys
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -86,6 +87,11 @@ class Config:
         )
 
 
+def log(msg: str, file=sys.stdout) -> None:
+    """Affiche `msg` précédé de la date et de l'heure (utile dans le log de cron)."""
+    print(f"{datetime.now():%Y-%m-%d %H:%M:%S} {msg}", file=file)
+
+
 def fetch_videos(cfg: Config):
     """Dernières vidéos publiques du compte, de la plus ancienne à la plus récente."""
     url = f"{cfg.url}/api/v1/accounts/{cfg.account}/videos?sort=-publishedAt&count=20"
@@ -142,12 +148,14 @@ def main() -> int:
     if not state_file.exists():
         state_file.parent.mkdir(parents=True, exist_ok=True)
         state_file.write_text(json.dumps([v["uuid"] for v in videos]))
-        print(f"Initialisation : {len(videos)} vidéos existantes mémorisées, rien annoncé.")
+        log(f"Initialisation : {len(videos)} vidéos existantes mémorisées, rien annoncé.")
         return 0
 
     seen = set(json.loads(state_file.read_text()))
     new = [v for v in videos if v["uuid"] not in seen]
     if not new:
+        # Toujours écrire une ligne, pour voir dans le log que la tâche a tourné.
+        log(f"Aucune nouvelle vidéo ({len(seen)} déjà vues).")
         return 0
 
     messages = [format_message(cfg, v) for v in new]
@@ -157,15 +165,16 @@ def main() -> int:
 
     # Les identifiants ne sont vérifiés qu'ici : --dry-run n'en a pas besoin.
     if not cfg.jid or not cfg.password:
-        print("JID/mot de passe XMPP manquants (voir peertube2xmpp.ini.example).",
-              file=sys.stderr)
+        log("JID/mot de passe XMPP manquants (voir peertube2xmpp.ini.example).",
+            file=sys.stderr)
         return 1
     if not send_to_muc(cfg, messages):
-        print("Échec de l'envoi XMPP, vidéos non marquées comme annoncées.",
-              file=sys.stderr)
+        log("Échec de l'envoi XMPP, vidéos non marquées comme annoncées.",
+            file=sys.stderr)
         return 1
 
     state_file.write_text(json.dumps(sorted(seen | {v["uuid"] for v in new})))
+    log(f"{len(new)} vidéo(s) annoncée(s) dans {cfg.room}.")
     return 0
 
 
