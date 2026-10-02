@@ -33,7 +33,7 @@ sans être annoncées, pour ne pas inonder le salon.
 
 ## Installation
 
-Prérequis : Python 3.8 ou plus récent, et un compte XMPP pour le bot (par exemple
+Prérequis : Python 3.9 ou plus récent, et un compte XMPP pour le bot (par exemple
 `peertube-bot@tarentule.us`). Si le salon est réservé aux membres, ajoutez ce
 compte comme membre.
 

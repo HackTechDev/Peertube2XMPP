@@ -90,25 +90,55 @@ class Config:
 
         # Accepte aussi la forme URI « xmpp:salon@serveur?join ».
         room = get(xmpp, "room", cls.room).removeprefix("xmpp:").split("?")[0]
+
+        # Les erreurs de configuration arrêtent le script avec un message
+        # clair, plutôt qu'avec une trace Python au milieu du traitement.
+        raw_timeout = get(xmpp, "timeout", cls.timeout)
+        try:
+            timeout = float(raw_timeout)
+        except ValueError:
+            timeout = 0
+        # « not > 0 » rejette aussi nan
+        if not timeout > 0:
+            sys.exit(f"timeout invalide : {raw_timeout!r} (nombre de secondes positif attendu)")
+
+        message = get(peertube, "message", cls.message).replace("\\n", "\n")
+        # Essai du modèle avec des valeurs fictives : une variable inconnue
+        # (ex. {titre}) ou une accolade isolée est signalée dès le lancement,
+        # même s'il n'y a aucune vidéo à annoncer.
+        try:
+            message.format(title="", url="", channel="", duration="")
+        except (KeyError, IndexError, ValueError, AttributeError) as exc:
+            sys.exit(f"message invalide : {message!r} ({type(exc).__name__} : {exc}). "
+                     "Variables disponibles : {title} {url} {channel} {duration} ; "
+                     "doubler les accolades littérales ({{ et }}).")
+
         return cls(
             jid=get(xmpp, "jid"),
             password=get(xmpp, "password"),
             room=room,
             nick=get(xmpp, "nick", cls.nick),
-            timeout=float(get(xmpp, "timeout", cls.timeout)),
+            timeout=timeout,
             # Le « / » final est retiré pour éviter un « // » dans les URL.
             url=get(peertube, "url", cls.url).rstrip("/"),
             account=get(peertube, "account", cls.account),
             # « ~ » est développé pour accepter ~/.local/share/… dans le fichier INI.
             state_file=os.path.expanduser(get(peertube, "state_file", cls.state_file)),
             # Dans un fichier INI, le saut de ligne s'écrit littéralement « \n ».
-            message=get(peertube, "message", cls.message).replace("\\n", "\n"),
+            message=message,
         )
 
 
 def log(msg: str, file=sys.stdout) -> None:
     """Affiche `msg` précédé de la date et de l'heure (utile dans le log de cron)."""
     print(f"{datetime.now():%Y-%m-%d %H:%M:%S} {msg}", file=file)
+
+
+def describe(exc) -> str:
+    """Texte d'une erreur, ou son type si le texte est vide (ex. TimeoutError())."""
+    # « exc or … » ne suffirait pas : une exception est toujours « vraie »,
+    # même quand son texte est vide.
+    return str(exc) or type(exc).__name__
 
 
 # --------------------------------------------------------------------------- #
@@ -154,9 +184,23 @@ def peertube_error(cfg: Config, exc: Exception) -> int:
     dépassé…) et ValueError une réponse qui n'est pas du JSON valide.
     """
     # URLError range la cause réelle dans .reason
-    reason = getattr(exc, "reason", None) or exc or type(exc).__name__
-    log(f"PeerTube injoignable ({cfg.url}) : {reason}", file=sys.stderr)
+    reason = getattr(exc, "reason", None) or exc
+    log(f"PeerTube injoignable ({cfg.url}) : {describe(reason)}", file=sys.stderr)
     return 1
+
+
+def load_seen(state_file: Path) -> set[str]:
+    """UUID mémorisés dans le fichier d'état (ensemble vide s'il n'existe pas).
+
+    Lève OSError si le fichier ne peut pas être lu, ValueError si son contenu
+    n'est pas une liste JSON de chaînes (fichier tronqué, modifié à la main…).
+    """
+    if not state_file.exists():
+        return set()
+    data = json.loads(state_file.read_text())
+    if not isinstance(data, list) or not all(isinstance(u, str) for u in data):
+        raise ValueError("liste JSON d'UUID attendue")
+    return set(data)
 
 
 def format_message(cfg: Config, video) -> str:
@@ -226,7 +270,7 @@ def send_to_muc(cfg: Config, messages: list[str]) -> None:
                     self.done.set_result(None)
             except Exception as exc:
                 self.fail(RuntimeError(f"impossible de rejoindre {cfg.room} : "
-                                       f"{exc or type(exc).__name__}"))
+                                       f"{describe(exc)}"))
 
         def on_failed_auth(self, _):
             """Le serveur a refusé le JID ou le mot de passe."""
@@ -282,6 +326,14 @@ def main() -> int:
     cfg = Config.load(args.config)
     # Fichier d'état : liste JSON des UUID des vidéos déjà vues ou annoncées.
     state_file = Path(cfg.state_file)
+    try:
+        seen = load_seen(state_file)
+    except (OSError, ValueError) as exc:
+        # On ne le réinitialise pas d'office : c'est à l'utilisateur de décider
+        # (le supprimer revient à refaire un premier lancement).
+        log(f"Fichier d'état illisible ({state_file}) : {describe(exc)}. "
+            "Corrigez-le, ou supprimez-le pour réinitialiser.", file=sys.stderr)
+        return 1
 
     # --- Vidéos à annoncer
     if args.video:
@@ -294,7 +346,6 @@ def main() -> int:
             return 1
         except (OSError, ValueError) as exc:
             return peertube_error(cfg, exc)
-        seen = set(json.loads(state_file.read_text())) if state_file.exists() else set()
     else:
         try:
             videos = fetch_videos(cfg)
@@ -313,7 +364,6 @@ def main() -> int:
             return 0
 
         # Nouvelles vidéos = celles dont l'UUID n'est pas encore dans le fichier
-        seen = set(json.loads(state_file.read_text()))
         new = [v for v in videos if v["uuid"] not in seen]
         if not new:
             # Toujours écrire une ligne, pour voir dans le log que la tâche a tourné.
@@ -339,7 +389,7 @@ def main() -> int:
     except Exception as exc:
         # Le fichier d'état n'est pas mis à jour : ces vidéos seront de
         # nouveau proposées au prochain lancement.
-        log(f"Échec de l'envoi XMPP : {exc or type(exc).__name__}. "
+        log(f"Échec de l'envoi XMPP : {describe(exc)}. "
             "Vidéos non marquées comme annoncées.", file=sys.stderr)
         return 1
 
