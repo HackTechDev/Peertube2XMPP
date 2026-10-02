@@ -38,7 +38,7 @@ Prérequis : Python 3.9 ou plus récent, et un compte XMPP pour le bot (par exem
 compte comme membre.
 
 ```bash
-git clone <url-du-depot> peertube2xmpp
+git clone https://github.com/HackTechDev/Peertube2XMPP.git peertube2xmpp
 cd peertube2xmpp
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
