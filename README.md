@@ -105,6 +105,14 @@ Afficher les messages qui seraient envoyés, sans se connecter à XMPP :
 .venv/bin/python peertube2xmpp.py --dry-run
 ```
 
+Annoncer une vidéo précise, même déjà vue (id court, UUID ou URL complète ;
+combinable avec `--dry-run`) :
+
+```bash
+.venv/bin/python peertube2xmpp.py --video cw5EuTUeyHhaKtZyc5S1R9
+.venv/bin/python peertube2xmpp.py --video https://peertube.hacktech.dev/w/cw5EuTUeyHhaKtZyc5S1R9
+```
+
 Utiliser un autre fichier de configuration :
 
 ```bash

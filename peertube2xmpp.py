@@ -8,6 +8,7 @@ Exemples :
     peertube2xmpp.py                  # annonce les nouvelles vidéos
     peertube2xmpp.py -c config.ini    # utilise un fichier de configuration précis
     peertube2xmpp.py --dry-run        # affiche les messages sans les envoyer
+    peertube2xmpp.py --video cw5EuTUeyHhaKtZyc5S1R9   # annonce une vidéo précise
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ import configparser
 import json
 import os
 import sys
+import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime
@@ -99,6 +101,15 @@ def fetch_videos(cfg: Config):
         return list(reversed(json.load(resp)["data"]))
 
 
+def fetch_video(cfg: Config, video_id: str):
+    """Vidéo désignée par son id (ex. cw5EuTUeyHhaKtZyc5S1R9) ou par son URL."""
+    # « https://…/w/cw5EuTUeyHhaKtZyc5S1R9 » → « cw5EuTUeyHhaKtZyc5S1R9 »
+    video_id = video_id.split("?")[0].rstrip("/").rsplit("/", 1)[-1]
+    url = f"{cfg.url}/api/v1/videos/{video_id}"
+    with urllib.request.urlopen(url, timeout=30) as resp:
+        return json.load(resp)
+
+
 def format_message(cfg: Config, video) -> str:
     minutes, seconds = divmod(video["duration"], 60)
     return cfg.message.format(
@@ -139,24 +150,35 @@ def main() -> int:
     ap.add_argument("-c", "--config", help="fichier de configuration INI")
     ap.add_argument("-n", "--dry-run", action="store_true",
                     help="affiche les messages sans les envoyer")
+    ap.add_argument("--video", metavar="ID",
+                    help="annonce cette vidéo (id ou URL), même si elle a déjà été vue")
     args = ap.parse_args()
 
     cfg = Config.load(args.config)
     state_file = Path(cfg.state_file)
-    videos = fetch_videos(cfg)
 
-    if not state_file.exists():
-        state_file.parent.mkdir(parents=True, exist_ok=True)
-        state_file.write_text(json.dumps([v["uuid"] for v in videos]))
-        log(f"Initialisation : {len(videos)} vidéos existantes mémorisées, rien annoncé.")
-        return 0
+    if args.video:
+        try:
+            new = [fetch_video(cfg, args.video)]
+        except urllib.error.HTTPError as exc:
+            log(f"Vidéo {args.video} introuvable sur {cfg.url} (HTTP {exc.code}).",
+                file=sys.stderr)
+            return 1
+        seen = set(json.loads(state_file.read_text())) if state_file.exists() else set()
+    else:
+        videos = fetch_videos(cfg)
+        if not state_file.exists():
+            state_file.parent.mkdir(parents=True, exist_ok=True)
+            state_file.write_text(json.dumps([v["uuid"] for v in videos]))
+            log(f"Initialisation : {len(videos)} vidéos existantes mémorisées, rien annoncé.")
+            return 0
 
-    seen = set(json.loads(state_file.read_text()))
-    new = [v for v in videos if v["uuid"] not in seen]
-    if not new:
-        # Toujours écrire une ligne, pour voir dans le log que la tâche a tourné.
-        log(f"Aucune nouvelle vidéo ({len(seen)} déjà vues).")
-        return 0
+        seen = set(json.loads(state_file.read_text()))
+        new = [v for v in videos if v["uuid"] not in seen]
+        if not new:
+            # Toujours écrire une ligne, pour voir dans le log que la tâche a tourné.
+            log(f"Aucune nouvelle vidéo ({len(seen)} déjà vues).")
+            return 0
 
     messages = [format_message(cfg, v) for v in new]
     if args.dry_run:
@@ -173,7 +195,10 @@ def main() -> int:
             file=sys.stderr)
         return 1
 
-    state_file.write_text(json.dumps(sorted(seen | {v["uuid"] for v in new})))
+    # Pas de création du fichier ici : avec --video avant l'initialisation, il ne
+    # contiendrait qu'une vidéo et le lancement suivant annoncerait toutes les autres.
+    if state_file.exists():
+        state_file.write_text(json.dumps(sorted(seen | {v["uuid"] for v in new})))
     log(f"{len(new)} vidéo(s) annoncée(s) dans {cfg.room}.")
     return 0
 
