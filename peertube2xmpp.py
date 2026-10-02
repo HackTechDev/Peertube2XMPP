@@ -114,7 +114,8 @@ def format_message(cfg: Config, video) -> str:
     minutes, seconds = divmod(video["duration"], 60)
     return cfg.message.format(
         title=video["name"],
-        url=video["url"],
+        # Lien court : https://instance/w/cw5EuTUeyHhaKtZyc5S1R9
+        url=f"{cfg.url}/w/{video['shortUUID']}",
         channel=video["channel"]["displayName"],
         duration=f"{minutes}:{seconds:02d}",
     )

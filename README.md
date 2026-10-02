@@ -9,7 +9,7 @@ un message de la forme :
 
 ```
 📺 Nouvelle vidéo : Titre de la vidéo
-https://peertube.hacktech.dev/videos/watch/…
+https://peertube.hacktech.dev/w/cw5EuTUeyHhaKtZyc5S1R9
 ```
 
 ## Fonctionnement
